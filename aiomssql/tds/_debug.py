@@ -1,4 +1,7 @@
+import asyncio
 import json
+import ssl
+import subprocess
 from typing import Any
 
 from aiomssql.tds.types import OptionFlags1, OptionFlags2, TypeFlags, OptionFlags3, TDSPacketType, \
@@ -181,4 +184,88 @@ def parse_login7_request_packet(data: bytes, show: bool = True):
 
     if show:
         print(f"\n=== Login7 Request ===\n{json.dumps(rv, indent=4)}")
+    return rv
+
+
+def _create_ssl_context() -> ssl.SSLContext:
+    """Create SQL Server-compatible SSL context"""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    # Mandatory protocol settings
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_3
+
+    # Approved cipher suites
+    ctx.set_ciphers(
+        'ECDHE-ECDSA-AES256-GCM-SHA384:'
+        'ECDHE-RSA-AES256-GCM-SHA384:'
+        'ECDHE-ECDSA-AES128-GCM-SHA256:'
+        'ECDHE-RSA-AES128-GCM-SHA256'
+    )
+
+    # Certificate verification
+    ctx.load_default_certs()
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.check_hostname = True
+
+    return ctx
+
+
+async def test_tls_handshake(host: str = 'localhost', port: int = 1433):
+    """Standalone TLS verification"""
+    ctx = _create_ssl_context()
+    try:
+        reader, writer = await asyncio.open_connection(
+            host, port,
+            ssl=ctx,
+            server_hostname=host
+        )
+
+        # Verify negotiated protocol
+        ssl_info = writer.get_extra_info('ssl_object')
+        print(f"Negotiated: {ssl_info.version()}, Cipher: {ssl_info.cipher()}")
+
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except Exception as e:
+        print(f"TLS test failed: {type(e).__name__}: {e}")
+        return False
+
+
+async def test_sql_server_cert():
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    try:
+        reader, writer = await asyncio.open_connection(
+            'localhost', 1433,
+            ssl=ctx,
+            server_hostname='localhost'
+        )
+        cert = writer.get_extra_info('ssl_object').getpeercert()
+        print(f"Server certificate: {cert['subject']}")
+        writer.close()
+        return True
+    except Exception as e:
+        print(f"No certificate detected: {e}")
+        return False
+
+
+def get_sql_server_encryption_data():
+    reg = r'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQLServer\SuperSocketNetLib'
+    rv = {}
+    for key in ['ForceEncryption', 'Certificate']:
+        try:
+            out = subprocess.check_output(['powershell', '-Command', f'(Get-ItemProperty -Path "{reg}" -Name "{key}")']).decode()
+            value = "UNSET"
+            for line in out.splitlines():
+                if line.startswith(key):
+                    value = line.split(':')[1].strip()
+                    if value.isdigit():
+                        value = int(value)
+            rv[key] = value
+        except subprocess.CalledProcessError:
+            rv[key] = None
     return rv

@@ -13,7 +13,7 @@ class PreLoginRequest(TDSPacket):
 
     def __init__(
         self,
-        encryption: EncryptionOption = EncryptionOption.NOT_SUPPORTED,
+        encryption: EncryptionOption = EncryptionOption.REQUIRED,
         named_instance: bool = False,
         mars_enabled: bool = False
     ):

@@ -4,9 +4,11 @@ Test script for async MSSQL login
 import asyncio
 
 from aiomssql import AsyncMSSQLDriver, connect, ConnectionConfig, LoginConfig
+from aiomssql.tds.io import TLSOptions
 
 
 async def test_login():
+
     conn_cfg = ConnectionConfig.local()
     login_cfg = LoginConfig(
         username='odbc_test',
@@ -21,7 +23,7 @@ async def test_login():
     # Test 1: Using context manager
     try:
         print(f"\nTest 1: Connecting to {conn_cfg.host}:{conn_cfg.port}")
-        async with connect(conn_cfg, login_cfg, "test") as conn:
+        async with connect(conn_cfg, login_cfg, "test", TLSOptions.insecure()) as conn:
             print("✓ Connected successfully using context manager!")
             print(f"  Connected: {conn.connected}")
 

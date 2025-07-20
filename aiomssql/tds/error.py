@@ -1,6 +1,6 @@
 import struct
 
-from aiomssql.tds.types import TokenType
+from aiomssql.tds.types import TokenType, EncryptionOption
 
 
 class TDSError(Exception):
@@ -16,6 +16,17 @@ class TDSLoginError(TDSError):
 class TDSProtocolError(TDSError):
     """Protocol violation exception"""
     pass
+
+
+class SSLNegotiationError(TDSError):
+
+    def __init__(self, client_encryption: EncryptionOption, server_encryption: EncryptionOption):
+        self.client_encryption = client_encryption
+        self.server_encryption = server_encryption
+        message = (
+            f"SSL/TLS negotiation failed: Client: {client_encryption.name}, Server: {server_encryption.name}"
+        )
+        super().__init__(message)
 
 
 class TDSResponseError(Exception):

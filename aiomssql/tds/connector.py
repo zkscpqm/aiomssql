@@ -5,11 +5,11 @@ from dataclasses import dataclass
 
 from aiomssql.tds.packet import TDSPacket
 from aiomssql.tds.config import ConnectionConfig, LoginConfig
-from aiomssql.tds.error import TDSError, TDSProtocolError, TDSResponseError
-from aiomssql.tds.io import AIO
+from aiomssql.tds.error import TDSError, TDSProtocolError, TDSResponseError, SSLNegotiationError
+from aiomssql.tds.io import AIO, TLSOptions
 from aiomssql.tds.request import Login7SQLAuthRequest, PreLoginRequest
 from aiomssql.tds.response import TDSPreLoginResponse, TDSLogin7Response
-from aiomssql.tds.types import TDSPacketType, TDSStatus, TokenType
+from aiomssql.tds.types import TDSPacketType, TDSStatus, TokenType, EncryptionOption
 
 
 @dataclass
@@ -29,29 +29,22 @@ class TDSConnector:
     Provides both low-level packet operations and high-level authentication methods.
     """
 
-    def __init__(self, cfg: ConnectionConfig, name: str = "unnamed_app"):
+    def __init__(self, name: str = "unnamed_app"):
         self._name: Final[str] = name
-        self.cfg: ConnectionConfig = cfg
         self.io: Optional[AIO] = None
         self.spid: int = 0
         self.is_connected: bool = False
         self._packet_id: int = 0
 
-    async def connect(self) -> None:
+    async def connect(self, connection_cfg: ConnectionConfig) -> None:
         """Establish TCP connection to SQL Server"""
         if self.is_connected:
             raise TDSError("Already connected")
-
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(self.cfg.host, self.cfg.port),
-                timeout=self.cfg.timeout
-            )
-            self.io = AIO(reader, writer)
+            self.io = await AIO.new(connection_cfg)
             self.is_connected = True
-            print(f"Connected to {self.cfg.host}:{self.cfg.port}")
         except asyncio.TimeoutError:
-            raise TDSError(f"Connection timeout to {self.cfg.host}:{self.cfg.port}")
+            raise TDSError(f"Connection timeout to {connection_cfg.host}:{connection_cfg.port}")
         except Exception as e:
             raise TDSError(f"Connection failed: {str(e)}")
 
@@ -62,15 +55,13 @@ class TDSConnector:
             self.io = None
         self.is_connected = False
         self.spid = 0
-        print("Disconnected")
 
     def _next_packet_id(self) -> int:
         """Get next packet ID (wraps at 255)"""
         self._packet_id = (self._packet_id % 255) + 1
         return self._packet_id
 
-    async def _send_packet(self, packet: TDSPacket,
-                           status: TDSStatus = TDSStatus.EOM) -> None:
+    async def _send_packet(self, packet: TDSPacket, status: TDSStatus = TDSStatus.EOM):
         """Send a TDS packet using a packet"""
         if not self.is_connected:
             raise TDSError("Not connected")
@@ -80,7 +71,6 @@ class TDSConnector:
 
         # Send the complete packet
         packet_data = packet.serialize(status, self.spid, self._next_packet_id())
-        print(f"Sending {packet.packet_type.name} packet, total size: {len(packet_data)}")
         await self.io.write(packet_data)
 
     async def _read_packet_header(self) -> TDSPacketHeader:
@@ -88,7 +78,6 @@ class TDSConnector:
         if not self.io:
             raise TDSError("Not connected")
 
-        print("Reading TDS packet header...")
         header_data = await self.io.read(8)
 
         packet_type = header_data[0]
@@ -109,7 +98,6 @@ class TDSConnector:
 
     async def _read_packet(self) -> Tuple[TDSPacketHeader, bytes]:
         """Read complete TDS packet"""
-        print("Reading TDS packet...")
         header = await self._read_packet_header()
 
         # Read packet data (excluding header)
@@ -118,14 +106,12 @@ class TDSConnector:
             data = await self.io.read(data_length)
         else:
             data = b''
-        print(f"Received packet type: {header.packet_type.name}, length: {len(data)}")
         return header, data
 
     async def _read_response(self) -> bytes:
         """Read complete response (may span multiple packets)"""
         response = bytearray()
 
-        print("Reading TDS response...")
         while True:
             header, data = await self._read_packet()
             response.extend(data)
@@ -181,11 +167,37 @@ class TDSConnector:
 
         return has_error and not has_loginack
 
-    async def _pre_login(self) -> TDSPreLoginResponse:
+    @staticmethod
+    def _should_encrypt(client_encryption: EncryptionOption, server_encryption: EncryptionOption) -> bool:
+        # Convert to 2-bit values (0-3)
+
+        c = client_encryption.value & 0b11
+        s = server_encryption.value & 0b11
+
+        # Pre-compute condition bits
+        client_cant = (c >> 1) & 1      # Client bit 2 (NOT_SUPPORTED)
+        client_prefer = c & 1            # Client bit 1 (ON/REQUIRED)
+        client_require = (c >> 1) & c    # Both bits set (REQUIRED)
+
+        server_cant = (s >> 1) & 1       # Server bit 2 (NOT_SUPPORTED)
+        server_prefer = s & 1            # Server bit 1 (ON/REQUIRED)
+        server_require = (s >> 1) & s    # Both bits set (REQUIRED)
+
+        # Compute failure cases first
+        if (client_cant & server_require) | (server_cant & client_require):
+            raise SSLNegotiationError(client_encryption=client_encryption, server_encryption=server_encryption)
+
+        # Compute final decision (bitwise OR of all positive conditions)
+        return bool((client_prefer & server_prefer) | client_require | server_require)
+
+    async def _pre_login(self, encryption: EncryptionOption = EncryptionOption.REQUIRED) -> TDSPreLoginResponse:
         """
         Perform pre-login handshake with the SQL Server.
 
         This method sends a pre-login packet and reads the response.
+
+        Args:
+            encryption: Encryption option to use (default is REQUIRED)
 
         Returns:
             TDSPreLoginResponse: Parsed pre-login response containing server options.
@@ -193,31 +205,29 @@ class TDSConnector:
         if not self.is_connected:
             raise TDSError("Not connected")
 
-        print("Sending pre-login request...")
-        packet = PreLoginRequest()
-        # parse_pre_login_request(packet.serialize())
+        packet = PreLoginRequest(encryption=encryption)
         await self._send_packet(packet)
 
-        print("Waiting for pre-login response...")
         header, data = await self._read_packet()
-        print(f"Pre-login response received, header: {header}")
         if header.packet_type != TDSPacketType.TABULAR_RESULT:
             raise TDSProtocolError(f"Expected TABULAR_RESULT, got {header.packet_type}")
         return TDSPreLoginResponse.deserialize(data)
 
-    async def login7_sql_credentials(self, login_cfg: LoginConfig) -> None:
+    async def login7_sql_credentials(self, login_cfg: LoginConfig, tls_options: TLSOptions):
         """
         Perform SQL Server authentication using username/password.
 
         Args:
             login_cfg: Login configuration containing username, password, database
+            tls_options: TLS options for secure connection (if needed)
         """
         if not self.is_connected:
             raise TDSError("Not connected")
 
         # Send pre-login
-        pre_login_response = await self._pre_login()
-        print(f"Pre-login response options: {pre_login_response}")
+        pre_login_response = await self._pre_login(encryption=tls_options.encryption)
+        if self._should_encrypt(tls_options.encryption, pre_login_response.encryption):
+            await self.io.upgrade_connection(tls_options)
 
         login7_request = Login7SQLAuthRequest(
             username=login_cfg.username,
@@ -230,16 +240,12 @@ class TDSConnector:
 
         b = await self._read_response()
         login7_response = TDSLogin7Response.deserialize(b)
-        print(f"Login7 response: {login7_response}")
 
         # TODO: Parse login response for success/failure
         # For now, assume success if we got a response
         print(f"Login successful for user '{login_cfg.username}'")
 
-    async def login7_windows_auth(
-        self, database: str = "master",
-        sspi_token: Optional[bytes] = None
-    ) -> None:
+    async def login7_windows_auth(self, database: str = "master", sspi_token: Optional[bytes] = None):
         """
         Perform Windows authentication (SSPI/Kerberos).
 
@@ -392,12 +398,3 @@ class TDSConnector:
     #     # Read response
     #     response = await self._read_response()
     #     print(f"Transaction started: {name or 'unnamed'}")
-
-    async def __aenter__(self):
-        """Async context manager entry"""
-        await self.connect()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit"""
-        await self.disconnect()

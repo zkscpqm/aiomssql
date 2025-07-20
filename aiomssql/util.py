@@ -1,5 +1,19 @@
 import dataclasses
+import socket
 from typing import Final
+
+
+def is_localhost(host: str) -> bool:
+    """Check if host refers to local machine"""
+    host = host.lower().strip('[]')  # Handle IPv6 [::1]
+    return host in {
+        'localhost',
+        '127.0.0.1',
+        '::1',
+        '0:0:0:0:0:0:0:1',
+        socket.gethostname().lower(),
+        socket.getfqdn().lower()
+    }
 
 
 @dataclasses.dataclass(frozen=True)
