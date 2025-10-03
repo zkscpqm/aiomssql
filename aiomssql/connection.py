@@ -26,8 +26,8 @@ class AsyncMSSQLDriver:
         if not login_cfg:
             raise ValueError("Login configuration is required")
         if not tls_options:
-            tls_options = TLSOptions.secure(server_hostname=self.conn_cfg.host)
-        await self.connector.connect(self.conn_cfg)
+            tls_options = TLSOptions.prefer_secure(server_hostname=self.conn_cfg.host, handshake_timeout=3.)
+        await self.connector.connect(self.conn_cfg, tls_options)
         await self.connector.login7_sql_credentials(login_cfg, tls_options)
         self.connected = True
 

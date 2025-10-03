@@ -138,6 +138,16 @@ class PreLoginRequest(TDSPacket):
         self.write_uint8(int(self._mars_enabled))  # MARS enabled
 
 
+class TLSRequest(TDSPacket):
+
+    def __init__(self, data: bytes):
+        self._data: bytes = data
+        super().__init__(TDSPacketType.PRELOGIN, prepare=False)
+        self.serialize()
+
+    def prepare(self): ...
+
+
 class Login7SQLAuthRequest(TDSPacket):
 
     def __init__(

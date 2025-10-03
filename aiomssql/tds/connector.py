@@ -1,15 +1,16 @@
 import asyncio
 import struct
+import warnings
 from typing import Optional, Tuple, Final
 from dataclasses import dataclass
 
 from aiomssql.tds.packet import TDSPacket
 from aiomssql.tds.config import ConnectionConfig, LoginConfig
-from aiomssql.tds.error import TDSError, TDSProtocolError, TDSResponseError, SSLNegotiationError
+from aiomssql.tds.error import TDSError, TDSProtocolError, TDSResponseError, SSLNegotiationError, TDSConnectionError
 from aiomssql.tds.io import AIO, TLSOptions
 from aiomssql.tds.request import Login7SQLAuthRequest, PreLoginRequest
 from aiomssql.tds.response import TDSPreLoginResponse, TDSLogin7Response
-from aiomssql.tds.types import TDSPacketType, TDSStatus, TokenType, EncryptionOption
+from aiomssql.tds.types import TDSPacketType, TDSStatus, TokenType, EncryptionOption, TDSVersion
 
 
 @dataclass
@@ -21,6 +22,29 @@ class TDSPacketHeader:
     spid: int
     packet_id: int
     window: int
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> 'TDSPacketHeader':
+        """
+        Deserialize TDS packet header from raw bytes.
+
+        Args:
+            data: Raw header bytes (8 bytes)
+
+        Returns:
+            TDSPacketHeader: Parsed header object
+        """
+        if len(data) < 8:
+            raise ValueError("Data too short for TDS packet header")
+
+        packet_type = TDSPacketType(data[0])
+        status = TDSStatus(data[1])
+        length = struct.unpack('>H', data[2:4])[0]
+        spid = struct.unpack('>H', data[4:6])[0]
+        packet_id = data[6]
+        window = data[7]
+
+        return cls(packet_type, status, length, spid, packet_id, window)
 
 
 class TDSConnector:
@@ -34,19 +58,58 @@ class TDSConnector:
         self.io: Optional[AIO] = None
         self.spid: int = 0
         self.is_connected: bool = False
+        self._connection_config: Optional[ConnectionConfig] = None
         self._packet_id: int = 0
 
-    async def connect(self, connection_cfg: ConnectionConfig) -> None:
+    @staticmethod
+    async def _connect(connection_cfg: ConnectionConfig, tls_options: Optional[TLSOptions] = None) -> AIO:
+        if connection_cfg.tds_version & TDSVersion.TDS_8X:
+            if tls_options is None or not tls_options.is_tls:
+                raise TDSConnectionError(f"TDS 8.0+ requires TLS, but no TLS options provided")
+            return await AIO.new(connection_cfg, tls_options)
+        if connection_cfg.tds_version & TDSVersion.TDS_7X:
+            if tls_options is not None and tls_options.is_tls:
+                parts = ("\nYou are trying to connect using protocol TDS 7.x and have TLS Enabled.",
+                         "While this is typically ok, this library does NOT perform the"
+                         " handshake in the way that Microsoft expects it as per their documentation:",
+                         "https://learn.microsoft.com/en-us/openspecs/windows_protocols/"
+                         "ms-tds/60f56408-0188-4cd5-8b90-25c6f2423868",
+                         "Instead, we initialise the TLS connection as we would in TDS 8.x",
+                         "This is due to Microsoft expecting the TLS handshake to happen over their protocol "
+                         "(thus having to manually implement TLS).",
+                         "Fuck off, Microsoft, ain't nobody got time for that",)
+                warnings.warn('\n'.join(parts), RuntimeWarning)
+                # Excerpt from the link:
+                #
+                # The SSL payloads MUST be transported as data in TDS packets
+                # with the message type set to 0x12 in the packet header. For example:
+                #
+                #  0x 12 01 00 4e 00 00 00 00// Packet Header
+                #  0x 16 03 01 00 &// SSL payload
+                # This applies to SSL traffic. The client sends the SSL handshake payloads as data in a PRELOGIN message
+            return await AIO.new(connection_cfg, tls_options)
+        raise TDSConnectionError(f"TDS version 0x{connection_cfg.tds_version:08x} not supported")
+
+    async def connect(
+        self,
+        connection_cfg: ConnectionConfig,
+        tls_options: Optional[TLSOptions] = None,
+        reconnect: bool = False
+    ) -> None:
         """Establish TCP connection to SQL Server"""
         if self.is_connected:
-            raise TDSError("Already connected")
+            if reconnect:
+                await self.disconnect()
+            else:
+                raise TDSError("Already connected")
         try:
-            self.io = await AIO.new(connection_cfg)
+            self.io = await self._connect(connection_cfg, tls_options)
             self.is_connected = True
+            self._connection_config = connection_cfg
         except asyncio.TimeoutError:
             raise TDSError(f"Connection timeout to {connection_cfg.host}:{connection_cfg.port}")
         except Exception as e:
-            raise TDSError(f"Connection failed: {str(e)}")
+            raise TDSError(f"Connection to {connection_cfg.host}:{connection_cfg.port} failed: {e}")
 
     async def disconnect(self) -> None:
         """Close the connection"""
@@ -79,22 +142,7 @@ class TDSConnector:
             raise TDSError("Not connected")
 
         header_data = await self.io.read(8)
-
-        packet_type = header_data[0]
-        status = header_data[1]
-        length = struct.unpack('>H', header_data[2:4])[0]
-        spid = struct.unpack('>H', header_data[4:6])[0]
-        packet_id = header_data[6]
-        window = header_data[7]
-
-        return TDSPacketHeader(
-            packet_type=TDSPacketType(packet_type),
-            status=TDSStatus(status),
-            length=length,
-            spid=spid,
-            packet_id=packet_id,
-            window=window
-        )
+        return TDSPacketHeader.deserialize(header_data)
 
     async def _read_packet(self) -> Tuple[TDSPacketHeader, bytes]:
         """Read complete TDS packet"""
@@ -171,24 +219,20 @@ class TDSConnector:
     def _should_encrypt(client_encryption: EncryptionOption, server_encryption: EncryptionOption) -> bool:
         # Convert to 2-bit values (0-3)
 
-        c = client_encryption.value & 0b11
-        s = server_encryption.value & 0b11
-
         # Pre-compute condition bits
-        client_cant = (c >> 1) & 1      # Client bit 2 (NOT_SUPPORTED)
-        client_prefer = c & 1            # Client bit 1 (ON/REQUIRED)
-        client_require = (c >> 1) & c    # Both bits set (REQUIRED)
+        client_cant = client_encryption == EncryptionOption.NOT_SUPPORTED
+        client_prefer = client_encryption == EncryptionOption.ON
+        client_require = client_encryption == EncryptionOption.REQUIRED
 
-        server_cant = (s >> 1) & 1       # Server bit 2 (NOT_SUPPORTED)
-        server_prefer = s & 1            # Server bit 1 (ON/REQUIRED)
-        server_require = (s >> 1) & s    # Both bits set (REQUIRED)
+        server_cant = server_encryption == EncryptionOption.NOT_SUPPORTED
+        server_require = server_encryption == EncryptionOption.REQUIRED
 
-        # Compute failure cases first
-        if (client_cant & server_require) | (server_cant & client_require):
+        if (client_cant and server_require) or (server_cant and client_require):
             raise SSLNegotiationError(client_encryption=client_encryption, server_encryption=server_encryption)
 
-        # Compute final decision (bitwise OR of all positive conditions)
-        return bool((client_prefer & server_prefer) | client_require | server_require)
+        if client_require or server_require:
+            return True
+        return client_prefer
 
     async def _pre_login(self, encryption: EncryptionOption = EncryptionOption.REQUIRED) -> TDSPreLoginResponse:
         """
@@ -212,6 +256,23 @@ class TDSConnector:
         if header.packet_type != TDSPacketType.TABULAR_RESULT:
             raise TDSProtocolError(f"Expected TABULAR_RESULT, got {header.packet_type}")
         return TDSPreLoginResponse.deserialize(data)
+    #
+    # async def _tls_handshake(self, tls_options: TLSOptions):
+    #     async with self.io.upgrade(tls_options) as handshake:
+    #         for status in handshake:
+    #             match status:
+    #                 case TLSHandshakeProgress.WAITING_FOR_DATA:
+    #                     print("Waiting for TLS handshake data")
+    #                     header_bytes = await self.io.unsafe_read(8)
+    #                     header = TDSPacketHeader.deserialize(header_bytes)
+    #                     print(f"Received TLS handshake header: {header}")
+    #                     b = await self.io.unsafe_read(header.length - 8)
+    #                     handshake.write(b)
+    #                 case TLSHandshakeProgress.MUST_SEND_DATA:
+    #                     print("Sending TLS handshake data")
+    #                     b = handshake.get_data()
+    #                     request = TLSRequest(b)
+    #                     await self.io.unsafe_write(request.serialize())
 
     async def login7_sql_credentials(self, login_cfg: LoginConfig, tls_options: TLSOptions):
         """
@@ -226,8 +287,8 @@ class TDSConnector:
 
         # Send pre-login
         pre_login_response = await self._pre_login(encryption=tls_options.encryption)
-        if self._should_encrypt(tls_options.encryption, pre_login_response.encryption):
-            await self.io.upgrade_connection(tls_options)
+        # if self._should_encrypt(tls_options.encryption, pre_login_response.encryption):
+        #     await self._tls_handshake(tls_options)
 
         login7_request = Login7SQLAuthRequest(
             username=login_cfg.username,
@@ -345,6 +406,7 @@ class TDSConnector:
             await self.disconnect()
         except Exception as e:
             print(f"Error during logout: {e}")
+
     #
     # async def write_raw(self, packet_type: TDSPacketType, data: bytes) -> None:
     #     """
@@ -357,15 +419,6 @@ class TDSConnector:
     #     packet = TDSPacket(packet_type)
     #     packet.write_bytes(data)
     #     await self._send_packet(packet)
-
-    async def read_raw(self) -> Tuple[TDSPacketHeader, bytes]:
-        """
-        Read raw packet (low-level interface).
-
-        Returns:
-            Tuple of (header, data)
-        """
-        return await self._read_packet()
     #
     # async def begin_transaction(self, name: str = "", isolation_level: int = 1) -> None:
     #     """

@@ -1,10 +1,15 @@
 import struct
 
-from aiomssql.tds.types import TokenType, EncryptionOption
+from aiomssql.tds.types import TokenType, EncryptionOption, TDSVersion
 
 
 class TDSError(Exception):
     """Base TDS exception"""
+    pass
+
+
+class TDSConnectionError(TDSError):
+    """Connection failed exception"""
     pass
 
 
@@ -27,6 +32,10 @@ class SSLNegotiationError(TDSError):
             f"SSL/TLS negotiation failed: Client: {client_encryption.name}, Server: {server_encryption.name}"
         )
         super().__init__(message)
+
+
+class SSLUpgradeError(TDSError):
+    """Error during SSL/TLS upgrade"""
 
 
 class TDSResponseError(Exception):

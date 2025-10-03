@@ -33,6 +33,10 @@ class TDSVersion(IntEnum):
     TDS_72 = 0x02000072
     TDS_73 = 0x03000073
     TDS_74 = 0x04000074
+    TDS_80 = 0x05000080
+
+    TDS_7X = 0x00000070  # Alias for TDS 7.x
+    TDS_8X = 0x00000080  # Alias for TDS 8.x
 
 
 class OptionFlags1(IntFlag):
@@ -104,10 +108,10 @@ class PreLoginOptionToken(IntEnum):
 
 class EncryptionOption(IntEnum):
     """Encryption options for pre-login"""
-    OFF = 0x00
-    ON = 0x01
-    NOT_SUPPORTED = 0x02
-    REQUIRED = 0x03
+    OFF = 0b00
+    ON = 0b01
+    NOT_SUPPORTED = 0b10
+    REQUIRED = 0b11
 
 
 class ClientLCID(IntEnum):
@@ -360,3 +364,9 @@ class Timezone(IntEnum):
         if hasattr(self, '_name_'):
             return f"{self._name_} ({offset_str})"
         return offset_str
+
+
+class TLSHandshakeProgress(IntEnum):
+    DONE = 0x0
+    WAITING_FOR_DATA = 0x1
+    MUST_SEND_DATA = 0x2
