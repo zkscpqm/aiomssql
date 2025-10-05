@@ -43,6 +43,12 @@ class Version:
         sub_build = version_int & 0xFF
         return cls(major, minor, build, sub_build)
 
+    def __eq__(self, other: 'Version') -> bool:
+        if not isinstance(other, Version):
+            return NotImplemented
+        return ((self.major, self.minor, self.build, self.sub_build)
+                == (other.major, other.minor, other.build, other.sub_build))
 
-VERSION: Final[Version] = Version(0, 1, 0, 0)
-AIOMSSQL: Final[str] = "AIOMSSQL TDS7 Driver"
+
+VERSION: Final[Version] = Version(0, 0, 1, 0)
+AIOMSSQL: Final[str] = "AIOMSSQL Python TDS Driver"

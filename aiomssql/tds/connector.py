@@ -8,9 +8,10 @@ from aiomssql.tds.packet import TDSPacket
 from aiomssql.tds.config import ConnectionConfig, LoginConfig
 from aiomssql.tds.error import TDSError, TDSProtocolError, TDSResponseError, SSLNegotiationError, TDSConnectionError
 from aiomssql.tds.io import AIO, TLSOptions
-from aiomssql.tds.request import Login7SQLAuthRequest, PreLoginRequest
+from aiomssql.tds.request import Login7SQLAuthRequest, PreLoginRequest, SQLBatchRequest
 from aiomssql.tds.response import TDSPreLoginResponse, TDSLogin7Response
 from aiomssql.tds.types import TDSPacketType, TDSStatus, TokenType, EncryptionOption, TDSVersion
+from aiomssql.util import Version
 
 
 @dataclass
@@ -35,7 +36,7 @@ class TDSPacketHeader:
             TDSPacketHeader: Parsed header object
         """
         if len(data) < 8:
-            raise ValueError("Data too short for TDS packet header")
+            raise ValueError(f"Data too short for TDS packet header ({len(data)}/8 bytes)")
 
         packet_type = TDSPacketType(data[0])
         status = TDSStatus(data[1])
@@ -45,6 +46,35 @@ class TDSPacketHeader:
         window = data[7]
 
         return cls(packet_type, status, length, spid, packet_id, window)
+
+
+class ConnectionInfo:
+
+    def __init__(self, connection_config: ConnectionConfig):
+        self._connection_config: ConnectionConfig = connection_config
+        self._server_version: Optional[Version] = None
+
+    @property
+    def tds_version(self) -> TDSVersion:
+        return self._connection_config.tds_version
+
+    @property
+    def packet_size(self) -> int:
+        return self._connection_config.packet_size
+
+    @property
+    def timeout(self) -> float:
+        return self._connection_config.timeout
+
+    def set_server_version(self, version: Version):
+        self._server_version = version
+
+    def verify(self, tds_version: TDSVersion, server_version: Version):
+        if tds_version != self._connection_config.tds_version:
+            raise TDSProtocolError(f"Server TDS version {tds_version} "
+                                   f"does not match client {self._connection_config.tds_version}")
+        if server_version != self._server_version:
+            raise TDSProtocolError(f"Server version {server_version} does not match expected {self._server_version}")
 
 
 class TDSConnector:
@@ -58,16 +88,16 @@ class TDSConnector:
         self.io: Optional[AIO] = None
         self.spid: int = 0
         self.is_connected: bool = False
-        self._connection_config: Optional[ConnectionConfig] = None
+        self._connection_info: Optional[ConnectionInfo] = None
         self._packet_id: int = 0
 
     @staticmethod
     async def _connect(connection_cfg: ConnectionConfig, tls_options: Optional[TLSOptions] = None) -> AIO:
-        if connection_cfg.tds_version & TDSVersion.TDS_8X:
+        if connection_cfg.tds_version & TDSVersion.TDS_8X_TX:
             if tls_options is None or not tls_options.is_tls:
                 raise TDSConnectionError(f"TDS 8.0+ requires TLS, but no TLS options provided")
             return await AIO.new(connection_cfg, tls_options)
-        if connection_cfg.tds_version & TDSVersion.TDS_7X:
+        if connection_cfg.tds_version & TDSVersion.TDS_7X_TX:
             if tls_options is not None and tls_options.is_tls:
                 parts = ("\nYou are trying to connect using protocol TDS 7.x and have TLS Enabled.",
                          "While this is typically ok, this library does NOT perform the"
@@ -105,7 +135,8 @@ class TDSConnector:
         try:
             self.io = await self._connect(connection_cfg, tls_options)
             self.is_connected = True
-            self._connection_config = connection_cfg
+            self._connection_info = ConnectionInfo(connection_cfg)
+            TDSPacket.set_tds_version(connection_cfg.tds_version)
         except asyncio.TimeoutError:
             raise TDSError(f"Connection timeout to {connection_cfg.host}:{connection_cfg.port}")
         except Exception as e:
@@ -119,12 +150,26 @@ class TDSConnector:
         self.is_connected = False
         self.spid = 0
 
+    async def execute_batch(self, sql: str, timeout: Optional[float] = None) -> None:
+        if timeout is None:
+            timeout = self._connection_info.timeout
+
+        # TODO: Check for packet size limit later
+
+        packet = SQLBatchRequest(sql)
+        print(f"DEBUG: Sending SQL batch: {sql}")
+        await self._send_packet(packet, dbg=True)
+        # resp = await self._read_response()
+        resp = await asyncio.wait_for(self._read_response(), timeout)
+        print(f"DEBUG: Batch executed, response length: {len(resp)}")
+
     def _next_packet_id(self) -> int:
         """Get next packet ID (wraps at 255)"""
-        self._packet_id = (self._packet_id % 255) + 1
-        return self._packet_id
+        return 1
+        # self._packet_id = (self._packet_id % 255) + 1
+        # return self._packet_id
 
-    async def _send_packet(self, packet: TDSPacket, status: TDSStatus = TDSStatus.EOM):
+    async def _send_packet(self, packet: TDSPacket, status: TDSStatus = TDSStatus.EOM, dbg: bool = False):
         """Send a TDS packet using a packet"""
         if not self.is_connected:
             raise TDSError("Not connected")
@@ -134,6 +179,18 @@ class TDSConnector:
 
         # Send the complete packet
         packet_data = packet.serialize(status, self.spid, self._next_packet_id())
+        if dbg:
+            example_packet = [
+                0x01, 0x01, 0x00, 0x5C, 0x00, 0x00, 0x01, 0x00, 0x16, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00,
+                0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x0A, 0x00,
+                0x73, 0x00, 0x65, 0x00, 0x6C, 0x00, 0x65, 0x00, 0x63, 0x00, 0x74, 0x00, 0x20, 0x00, 0x27, 0x00,
+                0x66, 0x00, 0x6F, 0x00, 0x6F, 0x00, 0x27, 0x00, 0x20, 0x00, 0x61, 0x00, 0x73, 0x00, 0x20, 0x00,
+                0x27, 0x00, 0x62, 0x00, 0x61, 0x00, 0x72, 0x00, 0x27, 0x00, 0x0A, 0x00, 0x20, 0x00, 0x20, 0x00,
+                0x20, 0x00, 0x20, 0x00, 0x20, 0x00, 0x20, 0x00, 0x20, 0x00, 0x20, 0x00
+            ]
+            print(f"expected_len({len(example_packet)}) == actual_len({len(packet_data)}) = {len(example_packet) == len(packet_data)}")
+            match = lambda l1, l2: sum(1 for i in range(min(len(l1), len(l2))) if l1[i] == l2[i]) / max(len(l1), len(l2))
+            print(f"match = {match(example_packet, list(packet_data)):.2%}")
         await self.io.write(packet_data)
 
     async def _read_packet_header(self) -> TDSPacketHeader:
@@ -256,23 +313,6 @@ class TDSConnector:
         if header.packet_type != TDSPacketType.TABULAR_RESULT:
             raise TDSProtocolError(f"Expected TABULAR_RESULT, got {header.packet_type}")
         return TDSPreLoginResponse.deserialize(data)
-    #
-    # async def _tls_handshake(self, tls_options: TLSOptions):
-    #     async with self.io.upgrade(tls_options) as handshake:
-    #         for status in handshake:
-    #             match status:
-    #                 case TLSHandshakeProgress.WAITING_FOR_DATA:
-    #                     print("Waiting for TLS handshake data")
-    #                     header_bytes = await self.io.unsafe_read(8)
-    #                     header = TDSPacketHeader.deserialize(header_bytes)
-    #                     print(f"Received TLS handshake header: {header}")
-    #                     b = await self.io.unsafe_read(header.length - 8)
-    #                     handshake.write(b)
-    #                 case TLSHandshakeProgress.MUST_SEND_DATA:
-    #                     print("Sending TLS handshake data")
-    #                     b = handshake.get_data()
-    #                     request = TLSRequest(b)
-    #                     await self.io.unsafe_write(request.serialize())
 
     async def login7_sql_credentials(self, login_cfg: LoginConfig, tls_options: TLSOptions):
         """
@@ -285,10 +325,8 @@ class TDSConnector:
         if not self.is_connected:
             raise TDSError("Not connected")
 
-        # Send pre-login
         pre_login_response = await self._pre_login(encryption=tls_options.encryption)
-        # if self._should_encrypt(tls_options.encryption, pre_login_response.encryption):
-        #     await self._tls_handshake(tls_options)
+        self._connection_info.set_server_version(pre_login_response.version)
 
         login7_request = Login7SQLAuthRequest(
             username=login_cfg.username,
@@ -296,14 +334,14 @@ class TDSConnector:
             appname=self._name,
             database=login_cfg.database,
         )
-        # parse_login7_request_packet(login7_request.serialize())
         await self._send_packet(login7_request)
 
         b = await self._read_response()
         login7_response = TDSLogin7Response.deserialize(b)
+        if login7_response.tds_version != self._connection_info.tds_version:
+            raise TDSProtocolError(f"Server TDS version {login7_response.tds_version:08x} "
+                                   f"does not match client {self._connection_info.tds_version:08x}")
 
-        # TODO: Parse login response for success/failure
-        # For now, assume success if we got a response
         print(f"Login successful for user '{login_cfg.username}'")
 
     async def login7_windows_auth(self, database: str = "master", sspi_token: Optional[bytes] = None):

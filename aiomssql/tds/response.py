@@ -1,9 +1,7 @@
 import struct
-from typing import Optional
 
 from aiomssql.tds.error import TDSProtocolError
-from aiomssql.tds.types import EncryptionOption, PreLoginOptionToken, OptionFlags3, TypeFlags, OptionFlags2, \
-    OptionFlags1, TDSVersion
+from aiomssql.tds.types import EncryptionOption, PreLoginOptionToken, TDSVersion, TokenType
 from aiomssql.util import Version
 
 
@@ -68,6 +66,8 @@ class TDSPreLoginResponse:
         mars_data = options.get(PreLoginOptionToken.MARS, b'\x00')
         mars_supported = mars_data[0] == 0x01 if mars_data else False
 
+        print(f"MARS SUPPORTED: {mars_supported}")
+
         return cls(
             version=version,
             encryption=encryption,
@@ -84,37 +84,11 @@ class TDSPreLoginResponse:
 
 class TDSLogin7Response:
 
-    def __init__(self,
-                 version: Version,
-                 tds_version: TDSVersion,
-                 packet_size: int,
-                 client_prog_ver: int,
-                 option_flags1: OptionFlags1,
-                 option_flags2: OptionFlags2,
-                 type_flags: TypeFlags,
-                 option_flags3: OptionFlags3,
-                 client_time_zone: int,
-                 client_lcid: int,
-                 hostname: Optional[str] = None,
-                 username: Optional[str] = None,
-                 appname: Optional[str] = None,
-                 server_name: Optional[str] = None,
-                 database: Optional[str] = None):
-        self.version = version
-        self.tds_version = tds_version
-        self.packet_size = packet_size
-        self.client_prog_ver = client_prog_ver
-        self.option_flags1 = option_flags1
-        self.option_flags2 = option_flags2
-        self.type_flags = type_flags
-        self.option_flags3 = option_flags3
-        self.client_time_zone = client_time_zone
-        self.client_lcid = client_lcid
-        self.hostname = hostname
-        self.username = username
-        self.appname = appname
-        self.server_name = server_name
-        self.database = database
+    def __init__(self, tds_version: TDSVersion, version: Version, tsql: bool, server_name: str):
+        self.version: Version = version
+        self.tds_version: TDSVersion = tds_version
+        self.server_name: str = server_name
+        self.tsql: bool = tsql
 
     @classmethod
     def deserialize(cls, data: bytes) -> 'TDSLogin7Response':
@@ -126,111 +100,75 @@ class TDSLogin7Response:
 
         Returns:
             TDSLogin7Response instance with parsed fields.
-        """
-        if len(data) < 32:  # Minimum size for fixed-length fields
-            raise TDSProtocolError("Login7 response too short")
 
+        """
         pos = 0
 
-        # Parse fixed-length fields
-        length = int.from_bytes(data[pos:pos+4], 'little')
-        pos += 4
-
-        tds_version = TDSVersion(int.from_bytes(data[pos:pos+4], 'little'))
-        pos += 4
-
-        packet_size = int.from_bytes(data[pos:pos+4], 'little')
-        pos += 4
-
-        client_prog_ver = int.from_bytes(data[pos:pos+4], 'little')
-        pos += 4
-
-        # Skip client PID (4 bytes) and connection ID (4 bytes)
-        pos += 8
-
-        option_flags1 = OptionFlags1(data[pos])
+        token_type = TokenType(data[pos])
         pos += 1
-
-        option_flags2 = OptionFlags2(data[pos])
+        if token_type != TokenType.LOGINACK:
+            raise TDSProtocolError(f"Unexpected token type: {token_type} ({token_type.name})")
+        pos += 2  # Skip length
+        tsql_enabled = bool(data[pos])
         pos += 1
-
-        type_flags = TypeFlags(data[pos])
-        pos += 1
-
-        option_flags3 = OptionFlags3(data[pos])
-        pos += 1
-
-        client_time_zone = int.from_bytes(data[pos:pos+4], 'little', signed=True)
+        tds_version = TDSVersion(struct.unpack('<I', data[pos:pos+4])[0])
         pos += 4
-
-        client_lcid = int.from_bytes(data[pos:pos+4], 'little')
-        pos += 4
-
-        # Parse variable-length fields offsets
-        offsets_start = pos
-        variable_fields = {}
-
-        # List of all possible variable fields in order
-        field_names = [
-            'hostname', 'username', 'password', 'appname',
-            'server_name', 'extension', 'clt_int_name', 'language',
-            'database', 'client_id', 'sspi', 'atch_db_file',
-            'change_password', 'extension_end'
-        ]
-
-        for field_name in field_names:
-            if pos + 4 > len(data):
-                break
-
-            offset = int.from_bytes(data[pos:pos+2], 'little')
-            length = int.from_bytes(data[pos+2:pos+4], 'little')
-            pos += 4
-
-            if offset > 0 and length > 0:
-                # Variable data starts at offset 0x60 from start of Login7 message
-                var_data_start = offsets_start + 2 * 18 * 2  # 18 fields * (offset+length)
-                field_start = var_data_start + (offset - 0x60)
-                field_end = field_start + length
-
-                if field_end <= len(data):
-                    try:
-                        variable_fields[field_name] = data[field_start:field_end].decode('utf-16le')
-                    except UnicodeDecodeError:
-                        variable_fields[field_name] = None
-
-        # Create version object (not present in Login7 response, using TDS version)
+        prog_name_len = int(data[pos])
+        pos += 1
+        prog_name_utf16_byte_len = prog_name_len * 2
+        bytes_ = data[pos:pos+prog_name_utf16_byte_len]
+        prog_name = bytes_.decode('utf-16le', errors='ignore').strip("\x00")
+        pos += prog_name_utf16_byte_len
         version = Version(
-            major=(tds_version.value >> 24) & 0xFF,
-            minor=(tds_version.value >> 16) & 0xFF,
-            build=(tds_version.value >> 8) & 0xFF,
-            sub_build=tds_version.value & 0xFF
-        )
-
+            major=data[pos],
+            minor=data[pos + 1],
+            build=data[pos + 2],
+            sub_build=data[pos + 3]
+        )  # Wtf? Why is this different?
         return cls(
-            version=version,
             tds_version=tds_version,
-            packet_size=packet_size,
-            client_prog_ver=client_prog_ver,
-            option_flags1=option_flags1,
-            option_flags2=option_flags2,
-            type_flags=type_flags,
-            option_flags3=option_flags3,
-            client_time_zone=client_time_zone,
-            client_lcid=client_lcid,
-            hostname=variable_fields.get('hostname'),
-            username=variable_fields.get('username'),
-            appname=variable_fields.get('appname'),
-            server_name=variable_fields.get('server_name'),
-            database=variable_fields.get('database')
+            version=version,
+            tsql=tsql_enabled,
+            server_name=prog_name
         )
 
     def __str__(self) -> str:
         return (f"TDSLogin7Response(version={self.version}, "
                 f"tds_version={self.tds_version.name}, "
-                f"packet_size={self.packet_size}, "
-                f"client_prog_ver=0x{self.client_prog_ver:08X}, "
-                f"hostname={self.hostname!r}, "
-                f"username={self.username!r}, "
-                f"database={self.database!r})")
+                f"server_name='{self.server_name}', "
+                f"tsql_supported={self.tsql})")
+
+    __repr__ = __str__
+
+
+class SQLBatchResponse:
+
+    def __init__(self, affected_rows: int):
+        self.affected_rows: int = affected_rows
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> 'SQLBatchResponse':
+        """
+        Deserialize a SQL Batch response from raw bytes.
+
+        Args:
+            data: Raw byte data from the SQL Batch response.
+
+        Returns:
+            SQLBatchResponse instance with parsed fields.
+        """
+        if len(data) < 8:
+            raise TDSProtocolError("Invalid SQL Batch response length")
+
+        token_type = TokenType(data[0])
+        if token_type != TokenType.DONE:
+            raise TDSProtocolError(f"Unexpected token type: {token_type} ({token_type.name})")
+
+        # Skip status (2 bytes) and current command (2 bytes)
+        affected_rows = struct.unpack('<I', data[4:8])[0]
+        return cls(affected_rows=affected_rows)
+
+    def __str__(self) -> str:
+        return f"SQLBatchResponse(affected_rows={self.affected_rows})"
 
     __repr__ = __str__

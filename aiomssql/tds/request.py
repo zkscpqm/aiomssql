@@ -5,8 +5,11 @@ from typing import Optional
 
 from aiomssql.tds.packet import TDSPacket
 from aiomssql.tds.types import TDSPacketType, OptionFlags1, OptionFlags2, TypeFlags, OptionFlags3, Timezone, ClientLCID, \
-    EncryptionOption, PreLoginOptionToken
+    EncryptionOption, PreLoginOptionToken, TransactionHeaderType
 from aiomssql.util import VERSION, AIOMSSQL
+
+
+_default_tx_descriptor_ull: int = 1 #420_069_420_069
 
 
 class PreLoginRequest(TDSPacket):
@@ -135,7 +138,7 @@ class PreLoginRequest(TDSPacket):
         self.write_uint8(self._encryption.value)
         self.write_uint8(int(self._named_instance))
         self.write_uint32(os.getpid() % 0xFFFFFFFF)  # Thread ID
-        self.write_uint8(int(self._mars_enabled))  # MARS enabled
+        self.write_uint8(int(self._mars_enabled), '<')  # MARS enabled
 
 
 class TLSRequest(TDSPacket):
@@ -231,15 +234,9 @@ class Login7SQLAuthRequest(TDSPacket):
     def _write_additional_offset_length_metadata(self):
         self.write_bytes(b"\x00"*6)  # Client ID placeholder (6 bytes)
 
-        self.write_uint16(0)  # SSPI placeholder - For Windows auth (2 bytes each)
-        self.write_uint16(0)
-
-        self.write_uint16(0)  # Attach DB file placeholder (2 bytes each)
-        self.write_uint16(0)
-
-        self.write_uint16(0)  # Change password fields. 0 on-login (2 bytes each)
-        self.write_uint16(0)
-
+        self.write_uint16(0, n=2)  # SSPI placeholder - For Windows auth (2 bytes each)
+        self.write_uint16(0, n=2)  # Attach DB file placeholder (2 bytes each)
+        self.write_uint16(0, n=2)  # Change password fields. 0 on-login (2 bytes each)
         self.write_uint32(0)  # SSPI long placeholder (4 bytes)
 
     def _write_variable_data(self):
@@ -258,3 +255,22 @@ class Login7SQLAuthRequest(TDSPacket):
         return bytes((((b << 4) | (b >> 4)) ^ 0xA5) & 0xFF for b in password.encode('utf-16le'))
 
 
+class SQLBatchRequest(TDSPacket):
+
+    def __init__(self, sql: str, transaction_id: int = _default_tx_descriptor_ull):
+        self._sql: bytes = sql.encode('utf-16le')
+        self._transaction_id: int = transaction_id
+        super().__init__(TDSPacketType.SQL_BATCH)
+
+    def _write_header(self):
+        mars_header_length = 18  # 4 - length, 2 - type, 8 - transaction_id, 4 - outstanding_request_count
+        total_headers_length = mars_header_length + 4
+        self.write_dword(total_headers_length)
+        self.write_dword(mars_header_length)
+        self.write_uint16(TransactionHeaderType.TRANSACTION_DESCRIPTOR)
+        self.write_uint64(self._transaction_id, '>')
+        self.write_dword(0)  # Outstanding request count. TODO: When MARS implemented, set this properly
+
+    def prepare(self):
+        self._write_header()
+        self.write_bytes(self._sql)

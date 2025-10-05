@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from aiomssql.tds.types import TDSVersion
@@ -9,7 +9,7 @@ class ConnectionConfig:
     host: str
     port: int = 1433
     timeout: float = 30.0
-    tds_version: TDSVersion = TDSVersion.TDS_80
+    tds_version: TDSVersion = field(default_factory=lambda: TDSVersion.TDS_80_TX)
     packet_size: int = 4096
 
     @classmethod

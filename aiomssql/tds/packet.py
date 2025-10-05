@@ -3,8 +3,7 @@ import struct
 from collections import namedtuple
 from typing import Optional
 
-from aiomssql.tds.types import TDSPacketType, TDSStatus
-
+from aiomssql.tds.types import TDSPacketType, TDSStatus, TDSVersion
 
 ByteData = namedtuple('ByteData', ['offset', 'length'])
 
@@ -15,7 +14,7 @@ class TDSPacket(abc.ABC):
     Handles primitive data types, byte ordering, and encoding.
     """
 
-    TDS_VERSION = 0x74000004  # Default TDS version (TDS 7.4)
+    TDS_VERSION: int = TDSVersion.TDS_74_TX  # Default TDS version (TDS 7.4)
 
     def __init__(self, packet_type: TDSPacketType, prepare: bool = True):
         """
@@ -84,38 +83,41 @@ class TDSPacket(abc.ABC):
         self._data[offset:offset + len(b)] = b
         return ByteData(offset, len(b))
     
-    def write_uint8(self, value: int) -> ByteData:
+    def write_uint8(self, value: int, byte_order: str = '<', n: int = 1) -> ByteData:
         """Write unsigned 8-bit integer"""
-        return self.write(struct.pack('<B', value & 0xFF))
+        return self.write(struct.pack(f'{byte_order}B', value & 0xFF) * n)
 
-    def write_int8(self, value: int) -> ByteData:
+    def write_int8(self, value: int, byte_order: str = '<', n: int = 1) -> ByteData:
         """Write signed 8-bit integer"""
-        return self.write(struct.pack('<b', value))
+        return self.write(struct.pack(f'{byte_order}b', value & 0xFF) * n)
 
-    def write_uint16(self, value: int, byte_order: str = '<') -> ByteData:
-        """Write unsigned 16-bit integer"""
+    def write_uint16(self, value: int, byte_order: str = '<', n: int = 1) -> ByteData:
+        """Write n unsigned 16-bit integers"""
         value &= 0xFFFF
-        return self.write(struct.pack(f'{byte_order}H', value))
+        return self.write(struct.pack(f'{byte_order}H', value) * n)
 
-    def write_int16(self, value: int, byte_order: str = '<') -> ByteData:
-        """Write signed 16-bit integer"""
-        return self.write(struct.pack(f'{byte_order}h', value))
+    def write_int16(self, value: int, byte_order: str = '<', n: int = 1) -> ByteData:
+        """Write n signed 16-bit integer"""
+        return self.write(struct.pack(f'{byte_order}h', value) * n)
 
-    def write_uint32(self, value: int, byte_order: str = '<') -> ByteData:
-        """Write unsigned 32-bit integer"""
-        return self.write(struct.pack(f'{byte_order}I', value & 0xFFFFFFFF))
+    def write_dword(self, value: int, byte_order: str = '<', n: int = 1) -> ByteData:
+        return self.write_int32(value, byte_order, n)
 
-    def write_int32(self, value: int, byte_order: str = '<') -> ByteData:
-        """Write signed 32-bit integer"""
-        return self.write(struct.pack(f'{byte_order}i', value))
+    def write_uint32(self, value: int, byte_order: str = '<', n: int = 1) -> ByteData:
+        """Write n unsigned 32-bit integer"""
+        return self.write(struct.pack(f'{byte_order}I', value & 0xFFFFFFFF) * n)
 
-    def write_uint64(self, value: int, byte_order: str = '<') -> ByteData:
-        """Write unsigned 64-bit integer"""
-        return self.write(struct.pack(f'{byte_order}Q', value & 0xFFFFFFFFFFFFFFFF))
+    def write_int32(self, value: int, byte_order: str = '<', n: int = 1) -> ByteData:
+        """Write n signed 32-bit integer"""
+        return self.write(struct.pack(f'{byte_order}i', value) * n)
 
-    def write_int64(self, value: int, byte_order: str = '<') -> ByteData:
-        """Write signed 64-bit integer"""
-        return self.write(struct.pack(f'{byte_order}q', value))
+    def write_uint64(self, value: int, byte_order: str = '<', n: int = 1) -> ByteData:
+        """Write n unsigned 64-bit integer"""
+        return self.write(struct.pack(f'{byte_order}Q', value & 0xFFFFFFFFFFFFFFFF) * n)
+
+    def write_int64(self, value: int, byte_order: str = '<', n: int = 1) -> ByteData:
+        """Write n signed 64-bit integer"""
+        return self.write(struct.pack(f'{byte_order}q', value) * n)
 
     def write_float(self, value: float) -> ByteData:
         """Write 32-bit float"""
@@ -219,5 +221,5 @@ class TDSPacket(abc.ABC):
 
     def __repr__(self) -> str:
         """String representation"""
-        return f"TDSByteBuilder(type={self.packet_type}, length={len(self._data)})"
+        return f"TDSPacket(type={self.packet_type.name}(0x{self.packet_type.value:1x}), length={len(self._data)})"
 

@@ -22,9 +22,9 @@ async def test_login():
 
     # Test 1: Using context manager
     try:
-        conn_cfg = ConnectionConfig.local(tds_version=TDSVersion.TDS_74)
+        conn_cfg = ConnectionConfig.local()
         print(f"\nTest 1: Connecting to {conn_cfg.host}:{conn_cfg.port}")
-        async with connect(conn_cfg, login_cfg, "test", TLSOptions.insecure()) as conn:
+        async with await connect(conn_cfg, login_cfg, "test", TLSOptions.insecure()) as conn:
             print("✓ Connected successfully using context manager!")
             print(f"  Connected: {conn.connected}")
 
@@ -34,7 +34,7 @@ async def test_login():
 
     # Test 2: Manual connection
     try:
-        conn_cfg = ConnectionConfig.local(tds_version=TDSVersion.TDS_74)
+        conn_cfg = ConnectionConfig.local(tds_version=TDSVersion.TDS_80_TX)
         print(f"\nTest 2: Manual connection to {conn_cfg.host}:{conn_cfg.port}")
         conn = AsyncMSSQLDriver(conn_cfg, application_name="test_manual")
         await conn.connect(login_cfg)
@@ -50,7 +50,7 @@ async def test_login():
     # Test 3: Invalid credentials
     try:
         print(f"\nTest 3: Testing invalid credentials")
-        async with connect(
+        async with await connect(
             conn_cfg, LoginConfig("invalid_login", "invalid_password")
         ):
             print("✗ This shouldn't happen - invalid credentials worked!")

@@ -1,5 +1,5 @@
 from enum import IntEnum, IntFlag
-from typing import Union
+from typing import Union, Self
 
 
 class TDSPacketType(IntEnum):
@@ -28,15 +28,46 @@ class TDSStatus(IntFlag):
 
 class TDSVersion(IntEnum):
     """Common TDS Versions"""
-    TDS_70 = 0x00000070
-    TDS_71 = 0x01000071
-    TDS_72 = 0x02000072
-    TDS_73 = 0x03000073
-    TDS_74 = 0x04000074
-    TDS_80 = 0x05000080
+    TDS_70_RX = 0x00000070
+    TDS_71_RX = 0x01000071
+    TDS_72_RX = 0x02000972
+    TDS_73_RX = 0x03000B73
+    TDS_74_RX = 0x04000074
+    TDS_80_RX = 0x00000008
 
-    TDS_7X = 0x00000070  # Alias for TDS 7.x
-    TDS_8X = 0x00000080  # Alias for TDS 8.x
+    TDS_7X_RX = 0x00000070  # Alias for TDS 7.x
+    TDS_8X_RX = 0x00000008  # Alias for TDS 8.x
+
+    TDS_70_TX = 0x70000000
+    TDS_71_TX = 0x71000001
+    TDS_72_TX = 0x72090002
+    TDS_73_TX = 0x730B0003
+    TDS_74_TX = 0x74000004
+    TDS_80_TX = 0x08000000
+
+    TDS_7X_TX = 0x70000000  # Alias for TDS 7.x
+    TDS_8X_TX = 0x08000000  # Alias for TDS 8.x
+
+    def opposite(self) -> 'TDSVersion':
+        """Get the byte-switched version for network transmission"""
+        return TDSVersion(
+            ((self & 0x000000FF) << 24) |  # byte 0 -> byte 3
+            ((self & 0x0000FF00) << 8) |  # byte 1 -> byte 2
+            ((self & 0x00FF0000) >> 8) |  # byte 2 -> byte 1
+            ((self & 0xFF000000) >> 24)  # byte 3 -> byte 0
+        )
+
+    def __eq__(self, other: Self) -> bool:
+        if not isinstance(other, TDSVersion):
+            return NotImplemented
+        mask32 = 0xFFFFFFFF
+        self_ = int(self) & mask32
+        opposite = int(self.opposite()) & mask32
+        other_ = int(other) & mask32
+        return self_ == other_ or opposite == other_
+
+    def __ne__(self, other: Self) -> bool:
+        return not self.__eq__(other)
 
 
 class OptionFlags1(IntFlag):
@@ -366,7 +397,7 @@ class Timezone(IntEnum):
         return offset_str
 
 
-class TLSHandshakeProgress(IntEnum):
-    DONE = 0x0
-    WAITING_FOR_DATA = 0x1
-    MUST_SEND_DATA = 0x2
+class TransactionHeaderType(IntEnum):
+    QUERY_NOTIFICATION = 0x01
+    TRANSACTION_DESCRIPTOR = 0x02
+    TRACE_ACTIVITY = 0x03

@@ -3,8 +3,8 @@ Async MSSQL Connection Implementation
 Handles connection establishment and login
 """
 from typing import Optional
-from contextlib import asynccontextmanager
 
+from aiomssql.rows import Row
 from aiomssql.tds.config import ConnectionConfig, LoginConfig
 from aiomssql.tds.connector import TDSConnector
 from aiomssql.tds.io import TLSOptions
@@ -41,18 +41,39 @@ class AsyncMSSQLDriver:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
 
+    async def query_one(
+        self,
+        query: str,
+        *args,
+        timeout: Optional[float] = None
+    ) -> Optional[Row]:
+        ...
 
-@asynccontextmanager
+    async def query(
+            self,
+            query: str,
+            *args,
+            timeout: Optional[float] = None
+    ) -> list[Row]:
+        ...
+
+    async def exec(
+        self,
+        query: str,
+        *args,
+        timeout: Optional[float] = None
+    ) -> int:
+        resp = await self.connector.execute_batch(query, timeout)
+        print(resp)
+
+
 async def connect(
     conn_cfg: ConnectionConfig, login_cfg: LoginConfig, app_name: str = 'unnamed_app',
     tls_options: Optional[TLSOptions] = None
-):
+) -> AsyncMSSQLDriver:
     """
     Create an async connection to MSSQL Server
     """
     conn = AsyncMSSQLDriver(conn_cfg, login_cfg, app_name)
     await conn.connect(login_cfg, tls_options=tls_options)
-    try:
-        yield conn
-    finally:
-        await conn.close()
+    return conn

@@ -1,6 +1,6 @@
 import struct
 
-from aiomssql.tds.types import TokenType, EncryptionOption, TDSVersion
+from aiomssql.tds.types import TokenType, EncryptionOption
 
 
 class TDSError(Exception):
